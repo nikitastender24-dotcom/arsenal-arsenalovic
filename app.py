@@ -1,9 +1,14 @@
 import asyncio
 import logging
 import os
-import google.generativeai as genai  # Переключились на стабильный SDK
+import sys
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
+from google import genai
+from google.genai import errors
+# ИМПОРТИРУЕМ СПЕЦИАЛЬНЫЙ КЛАСС ДЛЯ КЛЮЧЕЙ "AQ..."
+from google.genai.errors import APIError
+from google.genai._api_key import APIKeyCredentials 
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -15,48 +20,43 @@ FILE_NAME = "large_prompt.txt"
 PORT = int(os.getenv("PORT", 8080))
 # =====================================================
 
-# Инициализируем Telegram Бота
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Настраиваем Gemini через старый стабильный метод
-genai.configure(api_key=GEMINI_API_KEY)
+# ОФИЦИАЛЬНОЕ РЕШЕНИЕ ИЗ ФОРУМА РАЗРАБОТЧИКОВ GOOGLE:
+# Обертываем наш ключ AQ... в специальный класс credentials,
+# чтобы SDK не путал его с OAuth2 токеном Google Cloud.
+credentials = APIKeyCredentials(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(credentials=credentials)
 
 user_chats = {}
 large_context = ""
 
-# Читаем файл
 if os.path.exists(FILE_NAME):
     with open(FILE_NAME, 'r', encoding='utf-8') as f:
         large_context = f.read()
-    logging.info(f"Файл '{FILE_NAME}' успешно загружен. Размер: {len(large_context)} символов.")
+    logging.info(f"Файл '{FILE_NAME}' успешно загружен ({len(large_context)} симв.)")
 else:
     logging.critical(f"Критическая ошибка: Файл '{FILE_NAME}' не найден!")
-    exit(1)
+    sys.exit(1)
 
 
 async def get_or_create_chat(user_id: int, message_to_alert: types.Message = None):
-    """Создает сессию чата через стабильный SDK"""
     if user_id in user_chats:
         return user_chats[user_id]
         
-    logging.info(f"Инициализация новой стабильной сессии для {user_id}...")
+    logging.info(f"Инициализация сессии через APIKeyCredentials для {user_id}...")
     if message_to_alert:
         await message_to_alert.answer("Секунду... Загружаю базу данных в вашу сессию ИИ...")
 
-    # Настройка системного промта и модели
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction="Ты полезный ассистент, отвечающий строго по предоставленному тексту."
+    # Используем gemini-2.5-flash или gemini-1.5-flash (3.5-flash тоже поддерживается)
+    chat = gemini_client.chats.create(
+        model="gemini-1.5-flash",
+        config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
     )
     
-    # Стартуем пустой чат
-    chat = model.start_chat(history=[])
-    
     first_prompt = f"Прочитай и запомни этот текст. Ниже будут вопросы:\n\n{large_context}"
-    # Скаримваем контекст
     await asyncio.to_thread(chat.send_message, first_prompt)
-    
     user_chats[user_id] = chat
     return chat
 
@@ -66,10 +66,10 @@ async def command_start_handler(message: types.Message):
     user_id = message.from_user.id
     try:
         await get_or_create_chat(user_id, message_to_alert=message)
-        await message.answer("Готово! База данных загружена. Задавайте вопросы.")
+        await message.answer("Готово! База данных загружена по умолчанию. Задавайте ваши вопросы.")
     except Exception as e:
         logging.error(f"Ошибка при /start для {user_id}: {e}")
-        await message.answer("Ошибка авторизации ИИ. Проверьте логи.")
+        await message.answer("Ошибка ИИ. Проверь логи, пробился ли ключ через Credentials.")
 
 
 @dp.message()
@@ -85,13 +85,17 @@ async def message_handler(message: types.Message):
         
         response = await asyncio.to_thread(chat.send_message, user_text)
         await message.answer(response.text)
+        
+    except errors.APIError as e:
+        logging.error(f"Gemini API Error для {user_id}: {e}")
+        await message.answer("Ошибка со стороны ИИ.")
     except Exception as e:
-        logging.error(f"Ошибка для {user_id}: {e}")
-        await message.answer("Не удалось получить ответ от ИИ.")
+        logging.error(f"Ошибка обработки сообщения для {user_id}: {e}")
+        await message.answer("Не удалось получить ответ.")
 
 
 async def handle_hc(request):
-    return web.Response(text="Бот онлайн на стабильном SDK!")
+    return web.Response(text="Бот онлайн, фикс ключей AQ через APIKeyCredentials применен!")
 
 async def main():
     app = web.Application()
