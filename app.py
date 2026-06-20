@@ -20,16 +20,18 @@ PORT = int(os.getenv("PORT", 8080))
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация ИИ Gemini с двойной авторизацией
+# КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
+# Для ключей формата AQ.Ab8... в новом SDK нужно ЖЕСТКО указать http_options={'api_version': 'v1beta'}
+# Библиотека сама переключится на REST и пробросит заголовок как надо.
 gemini_client = genai.Client(
     api_key=GEMINI_API_KEY,
-    http_options={"headers": {"X-goog-api-key": GEMINI_API_KEY}}
+    http_options={'api_version': 'v1beta'}
 )
 
 user_chats = {}
 large_context = ""
 
-# Читаем файл из репозитория при старте сервера
+# Читаем тяжелый текстовый файл
 if os.path.exists(FILE_NAME):
     with open(FILE_NAME, 'r', encoding='utf-8') as f:
         large_context = f.read()
@@ -40,21 +42,18 @@ else:
 
 
 async def get_or_create_chat(user_id: int, message_to_alert: types.Message = None):
-    """
-    Возвращает существующий чат или создает новый, 
-    автоматически загружая туда 700 КБ промта по умолчанию.
-    """
+    """Возвращает существующий чат или создает новый сеанс с загруженным промтом"""
     if user_id in user_chats:
         return user_chats[user_id]
         
-    logging.info(f"Инициализация новой сессии для пользователя {user_id}...")
+    logging.info(f"Инициализация новой сессии google-genai для пользователя {user_id}...")
     
-    # Если это первое сообщение, предупреждаем пользователя, так как загрузка 700 КБ занимает время
     if message_to_alert:
         await message_to_alert.answer("Секунду... Загружаю базу данных в вашу сессию ИИ...")
 
+    # Используем стабильную gemini-1.5-flash, которая без проблем переваривает 1 млн токенов контекста через REST
     chat = gemini_client.chats.create(
-        model="gemini-3.5-flash",
+        model="gemini-1.5-flash",
         config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
     )
     
@@ -68,43 +67,40 @@ async def get_or_create_chat(user_id: int, message_to_alert: types.Message = Non
 
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message):
-    """При команде /start просто принудительно создаем сессию заранее"""
     user_id = message.from_user.id
     try:
         await get_or_create_chat(user_id, message_to_alert=message)
         await message.answer("Готово! База данных загружена по умолчанию. Задавайте ваши вопросы.")
     except Exception as e:
         logging.error(f"Ошибка при /start для {user_id}: {e}")
-        await message.answer("Ошибка инициализации. Возможно, ваш API-ключ Gemini заблокирован.")
+        await message.answer("Ошибка авторизации ИИ. Если ошибка 401 повторяется — значит ключ забанен Google.")
 
 
 @dp.message()
 async def message_handler(message: types.Message):
-    """Обработка любых сообщений. Если сессии нет — она создастся на лету"""
     user_id = message.from_user.id
     user_text = message.text
 
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
     try:
-        # Автоматически получаем или создаем чат (промт зашлется по умолчанию, если его не было)
         chat = await get_or_create_chat(user_id, message_to_alert=message)
-        
-        # Показываем статус "печатает" повторно, так как инициализация могла занять время
         await bot.send_chat_action(chat_id=message.chat.id, action="typing")
         
-        # Отправляем текущий вопрос пользователя
         response = await asyncio.to_thread(chat.send_message, user_text)
         await message.answer(response.text)
         
+    except errors.APIError as e:
+        logging.error(f"Gemini API Error для {user_id}: {e}")
+        await message.answer("Ошибка со стороны ИИ. Возможно, лимиты ключа исчерпаны.")
     except Exception as e:
         logging.error(f"Ошибка обработки сообщения для {user_id}: {e}")
-        await message.answer("Не удалось получить ответ. Проверьте логи сервера или обновите API-ключ.")
+        await message.answer("Не удалось получить ответ от ИИ.")
 
 
 # Заглушка для проверки доступности (Healthcheck) от Railway
 async def handle_hc(request):
-    return web.Response(text="Бот активен, промт по умолчанию загружен в память сервера!")
+    return web.Response(text="Бот активен, google-genai v1beta запущен!")
 
 async def main():
     app = web.Application()
