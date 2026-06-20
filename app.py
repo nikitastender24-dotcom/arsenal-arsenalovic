@@ -7,7 +7,7 @@ from google import genai
 from google.genai import errors
 from aiohttp import web
 
-# Настройка логирования
+# Настройка логирования1
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ================= ФИНАЛЬНЫЕ КЛЮЧИ =================
