@@ -10,19 +10,17 @@ from aiohttp import web
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ================= ЖЕСТКО ВШИТЫЕ КЛЮЧИ =================
+# ================= ФИНАЛЬНЫЕ КЛЮЧИ =================
 TELEGRAM_BOT_TOKEN = "8843575311:AAEJElYqN7OUH8HftqcILd8GEBvrnrALANY"
-GEMINI_API_KEY = "AQ.Ab8RN6L5lv7yO0bAJeDARh7v6DnNG_pSjvh_ddxIr2qIBK-J6Q"
+GEMINI_API_KEY = "AQ.Ab8RN6LNCGfezco-Om8crrq8yHaWqdVclOnKQJ8cZg2vkFXmJQ"
 FILE_NAME = "large_prompt.txt"
 PORT = int(os.getenv("PORT", 8080))
-# =======================================================
+# ===================================================
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ:
-# Для ключей формата AQ.Ab8... в новом SDK нужно ЖЕСТКО указать http_options={'api_version': 'v1beta'}
-# Библиотека сама переключится на REST и пробросит заголовок как надо.
+# Инициализируем клиент с версией v1beta для стабильной работы по REST
 gemini_client = genai.Client(
     api_key=GEMINI_API_KEY,
     http_options={'api_version': 'v1beta'}
@@ -35,9 +33,9 @@ large_context = ""
 if os.path.exists(FILE_NAME):
     with open(FILE_NAME, 'r', encoding='utf-8') as f:
         large_context = f.read()
-    logging.info(f"Файл '{FILE_NAME}' на {len(large_context)} символов успешно прочитан из репозитория.")
+    logging.info(f"Файл '{FILE_NAME}' успешно загружен. Размер: {len(large_context)} символов.")
 else:
-    logging.critical(f"Критическая ошибка: Файл '{FILE_NAME}' не найден в корне проекта!")
+    logging.critical(f"Критическая ошибка: Файл '{FILE_NAME}' не найден в репозитории!")
     exit(1)
 
 
@@ -46,20 +44,18 @@ async def get_or_create_chat(user_id: int, message_to_alert: types.Message = Non
     if user_id in user_chats:
         return user_chats[user_id]
         
-    logging.info(f"Инициализация новой сессии google-genai для пользователя {user_id}...")
+    logging.info(f"Инициализация новой сессии для пользователя {user_id}...")
     
     if message_to_alert:
         await message_to_alert.answer("Секунду... Загружаю базу данных в вашу сессию ИИ...")
 
-    # Используем стабильную gemini-1.5-flash, которая без проблем переваривает 1 млн токенов контекста через REST
+    # Используем проверенную модель gemini-1.5-flash
     chat = gemini_client.chats.create(
         model="gemini-1.5-flash",
         config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
     )
     
     first_prompt = f"Прочитай и запомни этот текст. Ниже будут вопросы:\n\n{large_context}"
-    
-    # Скармливаем промт по умолчанию в фоне
     await asyncio.to_thread(chat.send_message, first_prompt)
     user_chats[user_id] = chat
     return chat
@@ -73,7 +69,7 @@ async def command_start_handler(message: types.Message):
         await message.answer("Готово! База данных загружена по умолчанию. Задавайте ваши вопросы.")
     except Exception as e:
         logging.error(f"Ошибка при /start для {user_id}: {e}")
-        await message.answer("Ошибка авторизации ИИ. Если ошибка 401 повторяется — значит ключ забанен Google.")
+        await message.answer("Не удалось запустить сессию ИИ. Проверь логи на Railway.")
 
 
 @dp.message()
@@ -92,15 +88,15 @@ async def message_handler(message: types.Message):
         
     except errors.APIError as e:
         logging.error(f"Gemini API Error для {user_id}: {e}")
-        await message.answer("Ошибка со стороны ИИ. Возможно, лимиты ключа исчерпаны.")
+        await message.answer("Ошибка со стороны ИИ. Возможно, файл слишком тяжелый или превышены лимиты.")
     except Exception as e:
         logging.error(f"Ошибка обработки сообщения для {user_id}: {e}")
-        await message.answer("Не удалось получить ответ от ИИ.")
+        await message.answer("Не удалось получить ответ.")
 
 
 # Заглушка для проверки доступности (Healthcheck) от Railway
 async def handle_hc(request):
-    return web.Response(text="Бот активен, google-genai v1beta запущен!")
+    return web.Response(text="Бот онлайн, применен новый API ключ!")
 
 async def main():
     app = web.Application()
@@ -109,7 +105,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logging.info(f"Фейковый веб-сервер запущен на порту {PORT}")
+    logging.info(f"Веб-сервер запущен на порту {PORT}")
     logging.info("Поллинг Telegram бота запущен...")
     await dp.start_polling(bot)
 
