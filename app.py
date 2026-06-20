@@ -7,15 +7,15 @@ from google import genai
 from google.genai import errors
 from aiohttp import web
 
-# Настройка логирования1
+# Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ================= ФИНАЛЬНЫЕ КЛЮЧИ =================
-TELEGRAM_BOT_TOKEN = "8843575311:AAEJElYqN7OUH8HftqcILd8GEBvrnrALANY"
+# ================= АКТУАЛЬНЫЕ КЛЮЧЕЙ =================
+TELEGRAM_BOT_TOKEN = "8843575311:AAHAc5994cnfJwbXUfMFdagENlRvIi2hye0"
 GEMINI_API_KEY = "AQ.Ab8RN6LNCGfezco-Om8crrq8yHaWqdVclOnKQJ8cZg2vkFXmJQ"
 FILE_NAME = "large_prompt.txt"
 PORT = int(os.getenv("PORT", 8080))
-# ===================================================
+# =====================================================
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
@@ -52,7 +52,7 @@ async def get_or_create_chat(user_id: int, message_to_alert: types.Message = Non
     # Используем проверенную модель gemini-1.5-flash
     chat = gemini_client.chats.create(
         model="gemini-1.5-flash",
-        config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
+        config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному текста."}
     )
     
     first_prompt = f"Прочитай и запомни этот текст. Ниже будут вопросы:\n\n{large_context}"
@@ -96,7 +96,7 @@ async def message_handler(message: types.Message):
 
 # Заглушка для проверки доступности (Healthcheck) от Railway
 async def handle_hc(request):
-    return web.Response(text="Бот онлайн, применен новый API ключ!")
+    return web.Response(text="Бот онлайн, применен новый токен Telegram!")
 
 async def main():
     app = web.Application()
