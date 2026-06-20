@@ -6,9 +6,8 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from google import genai
 from google.genai import errors
-# ИМПОРТИРУЕМ СПЕЦИАЛЬНЫЙ КЛАСС ДЛЯ КЛЮЧЕЙ "AQ..."
-from google.genai.errors import APIError
-from google.genai._api_key import APIKeyCredentials 
+# Используем стандартный, публичный класс авторизации Google
+from google.auth.credentials import ApiKeyCredentials
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -23,11 +22,11 @@ PORT = int(os.getenv("PORT", 8080))
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# ОФИЦИАЛЬНОЕ РЕШЕНИЕ ИЗ ФОРУМА РАЗРАБОТЧИКОВ GOOGLE:
-# Обертываем наш ключ AQ... в специальный класс credentials,
-# чтобы SDK не путал его с OAuth2 токеном Google Cloud.
-credentials = APIKeyCredentials(api_key=GEMINI_API_KEY)
-gemini_client = genai.Client(credentials=credentials)
+# Передаем новый ключ через стандартный ApiKeyCredentials.
+# Это заставит google-genai работать с ним как с обычным API-ключом,
+# игнорируя настройки gRPC/OAuth2 самого Railway.
+client_credentials = ApiKeyCredentials(token=GEMINI_API_KEY)
+gemini_client = genai.Client(credentials=client_credentials)
 
 user_chats = {}
 large_context = ""
@@ -45,11 +44,10 @@ async def get_or_create_chat(user_id: int, message_to_alert: types.Message = Non
     if user_id in user_chats:
         return user_chats[user_id]
         
-    logging.info(f"Инициализация сессии через APIKeyCredentials для {user_id}...")
+    logging.info(f"Инициализация новой сессии для пользователя {user_id}...")
     if message_to_alert:
         await message_to_alert.answer("Секунду... Загружаю базу данных в вашу сессию ИИ...")
 
-    # Используем gemini-2.5-flash или gemini-1.5-flash (3.5-flash тоже поддерживается)
     chat = gemini_client.chats.create(
         model="gemini-1.5-flash",
         config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
@@ -69,7 +67,7 @@ async def command_start_handler(message: types.Message):
         await message.answer("Готово! База данных загружена по умолчанию. Задавайте ваши вопросы.")
     except Exception as e:
         logging.error(f"Ошибка при /start для {user_id}: {e}")
-        await message.answer("Ошибка ИИ. Проверь логи, пробился ли ключ через Credentials.")
+        await message.answer("Ошибка ИИ. Проверь логи сборки.")
 
 
 @dp.message()
@@ -95,7 +93,7 @@ async def message_handler(message: types.Message):
 
 
 async def handle_hc(request):
-    return web.Response(text="Бот онлайн, фикс ключей AQ через APIKeyCredentials применен!")
+    return web.Response(text="Бот онлайн, импорты исправлены!")
 
 async def main():
     app = web.Application()
