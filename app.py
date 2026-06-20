@@ -6,8 +6,6 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart
 from google import genai
 from google.genai import errors
-# Используем стандартный, публичный класс авторизации Google
-from google.auth.credentials import ApiKeyCredentials
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -22,11 +20,15 @@ PORT = int(os.getenv("PORT", 8080))
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Передаем новый ключ через стандартный ApiKeyCredentials.
-# Это заставит google-genai работать с ним как с обычным API-ключом,
-# игнорируя настройки gRPC/OAuth2 самого Railway.
-client_credentials = ApiKeyCredentials(token=GEMINI_API_KEY)
-gemini_client = genai.Client(credentials=client_credentials)
+# РАБОЧИЙ ВАРИАНТ ДЛЯ НОВЫХ КЛЮЧЕЙ:
+# Инициализируем клиент без credentials, но принудительно перебиваем 
+# заголовки запросов, чтобы новый ключ передавался напрямую как API-key.
+gemini_client = genai.Client(
+    api_key=GEMINI_API_KEY,
+    http_options={
+        'headers': {'X-goog-api-key': GEMINI_API_KEY}
+    }
+)
 
 user_chats = {}
 large_context = ""
@@ -44,10 +46,11 @@ async def get_or_create_chat(user_id: int, message_to_alert: types.Message = Non
     if user_id in user_chats:
         return user_chats[user_id]
         
-    logging.info(f"Инициализация новой сессии для пользователя {user_id}...")
+    logging.info(f"Инициализация сессии Gemini для {user_id}...")
     if message_to_alert:
         await message_to_alert.answer("Секунду... Загружаю базу данных в вашу сессию ИИ...")
 
+    # Работаем через дефолтную gemini-1.5-flash
     chat = gemini_client.chats.create(
         model="gemini-1.5-flash",
         config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
@@ -93,7 +96,7 @@ async def message_handler(message: types.Message):
 
 
 async def handle_hc(request):
-    return web.Response(text="Бот онлайн, импорты исправлены!")
+    return web.Response(text="Бот онлайн, импорты очищены!")
 
 async def main():
     app = web.Application()
