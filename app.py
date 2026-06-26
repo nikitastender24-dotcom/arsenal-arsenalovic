@@ -42,7 +42,7 @@ async def get_or_create_chat(user_id: int, message_to_alert: types.Message = Non
         await message_to_alert.answer("Секунду... Загружаю базу данных в вашу сессию ИИ...")
 
     chat = gemini_client.chats.create(
-        model="gemini-1.5-flash",
+        model="gemini-2.5-flash",
         config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
     )
     
