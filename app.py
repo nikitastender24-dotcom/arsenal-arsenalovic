@@ -10,9 +10,8 @@ from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Настройки и ключи (пробел в токене DeepSeek убран)
-TELEGRAM_BOT_TOKEN = "8843575311:AAHAc5994cnfJwbXUfMFdagENlRvIi2hye0"
-DEEPSEEK_API_KEY = "sk-fbd9r8687c3de42ae9580e045e3a9c543"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "ВАШ_ТОКЕН_СЮДА")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "ВАШ_КЛЮЧ_СЮДА")
 FILE_NAME = "large_prompt.txt"
 PORT = int(os.getenv("PORT", 8080))
 BOT_USERNAME = "arsi"
@@ -21,16 +20,15 @@ MODEL = "deepseek-chat"
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Инициализация асинхронного клиента OpenAI для работы с DeepSeek API
+# ✅ Исправлен base_url - убран /v1 на конце
 openai_client = AsyncOpenAI(
     api_key=DEEPSEEK_API_KEY,
-    base_url="https://api.deepseek.com/v1"
+    base_url="https://api.deepseek.com"
 )
 
-chat_history = []  # Список для хранения истории диалога
+chat_history = []
 large_context = ""
 
-# Чтение локального файла с контекстом
 if os.path.exists(FILE_NAME):
     with open(FILE_NAME, 'r', encoding='utf-8') as f:
         large_context = f.read()
@@ -41,17 +39,14 @@ else:
 
 
 async def ask_deepseek(user_text: str) -> str:
-    """Отправляет запрос в DeepSeek. Кэширование происходит автоматически на стороне API."""
     global chat_history
 
-    # Добавляем реплику пользователя в историю
     chat_history.append({"role": "user", "content": user_text})
 
-    # Формируем фиксированный системный промт с твоим файлом.
-    # Так как он не меняется, сервер DeepSeek автоматически закеширует эти токены.
-    system_instruction = f"Ты полезный ассистент. Отвечай строго по загруженному тексту:\n\n{large_context}"
-    
-    # Собираем пачку для отправки: Системник + накопленная история
+    system_instruction = (
+        f"Ты полезный ассистент. Отвечай строго по загруженному тексту:\n\n{large_context}"
+    )
+
     messages = [{"role": "system", "content": system_instruction}] + chat_history
 
     try:
@@ -60,13 +55,11 @@ async def ask_deepseek(user_text: str) -> str:
             messages=messages,
             stream=False
         )
-        
+
         reply = response.choices[0].message.content
-        
-        # Добавляем ответ ассистента в историю диалога
+
         chat_history.append({"role": "assistant", "content": reply})
 
-        # Держим историю в пределах 20 сообщений, чтобы не раздувать контекст
         if len(chat_history) > 20:
             chat_history = chat_history[-20:]
 
@@ -74,14 +67,12 @@ async def ask_deepseek(user_text: str) -> str:
 
     except Exception as e:
         logging.error(f"Ошибка API DeepSeek: {e}")
-        # Перестраховка: если запрос упал, удаляем последнее сообщение юзера, чтобы не двоилось при повторе
         if chat_history and chat_history[-1]["content"] == user_text:
             chat_history.pop()
         raise e
 
 
 async def handle_message(message: Message, text: str):
-    """Общая функция обработки и отправки ответа"""
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
         reply = await ask_deepseek(text)
@@ -104,7 +95,7 @@ async def cmd_status(message: Message):
     await message.answer(
         f"✅ Бот работает на модели `{MODEL}`\n"
         f"Размер системного контекста: {len(large_context)} симв.\n"
-        f"Сообщений в текущей истории: {len(chat_history)}", 
+        f"Сообщений в текущей истории: {len(chat_history)}",
         parse_mode="Markdown"
     )
 
@@ -128,12 +119,10 @@ async def private_message(message: Message):
 
 
 async def handle_hc(request):
-    """Эндпоинт для прохождения хелсчеков на хостингах"""
     return web.Response(text="Бот онлайн!")
 
 
 async def main():
-    # Запуск параллельного веб-сервера aiohttp для портов (хостинги типа Render/Railway)
     app = web.Application()
     app.router.add_get('/', handle_hc)
     runner = web.AppRunner(app)
@@ -141,8 +130,7 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     logging.info(f"Веб-сервер запущен на порту {PORT}")
-    
-    # Запуск поллинга Telegram-бота
+
     await dp.start_polling(bot)
 
 
