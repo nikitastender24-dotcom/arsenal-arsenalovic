@@ -22,8 +22,8 @@ bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-cache_name = None        # имя кеша на серверах Google
-chat_history = []        # история сообщений глобальная
+cache_name = None
+chat_history = []
 large_context = ""
 
 if os.path.exists(FILE_NAME):
@@ -36,19 +36,20 @@ else:
 
 
 async def init_cache():
-    """Загружает промт в кеш Google один раз при старте"""
     global cache_name
     try:
-        logging.info("Создаю кеш промта на серверах Google...")
+        logging.info("Загружаю файл в Files API...")
+        tmp_path = "/tmp/large_prompt.txt"
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            f.write(large_context)
 
-        # Загружаем файл через Files API
         uploaded = await asyncio.to_thread(
             gemini_client.files.upload,
-            file=(FILE_NAME.encode(), large_context.encode('utf-8')),
+            file=tmp_path,
             config={"mime_type": "text/plain", "display_name": "large_prompt"}
         )
+        logging.info(f"Файл загружен: {uploaded.uri}")
 
-        # Создаём кеш со ссылкой на файл — TTL 1 час
         cache = await asyncio.to_thread(
             gemini_client.caches.create,
             model=MODEL,
@@ -69,14 +70,14 @@ async def init_cache():
         )
         cache_name = cache.name
         logging.info(f"Кеш создан: {cache_name}")
+
     except Exception as e:
         logging.error(f"Ошибка создания кеша: {e}")
-        logging.warning("Буду работать без кеша (через system_instruction)")
+        logging.warning("Работаю без кеша — каждый запрос будет тратить токены на промт!")
         cache_name = None
 
 
 async def ask_gemini(user_text: str) -> str:
-    """Отправляет вопрос, используя кеш если есть"""
     global chat_history
 
     chat_history.append(
@@ -84,34 +85,27 @@ async def ask_gemini(user_text: str) -> str:
     )
 
     if cache_name:
-        # Запрос с кешем — промт не тратит токены заново
         config = gtypes.GenerateContentConfig(
             cached_content=cache_name
         )
-        response = await asyncio.to_thread(
-            gemini_client.models.generate_content,
-            model=MODEL,
-            contents=chat_history,
-            config=config
-        )
     else:
-        # Fallback без кеша
         config = gtypes.GenerateContentConfig(
-            system_instruction=f"Ты полезный ассистент. Отвечай по тексту:\n\n{large_context}"
+            system_instruction=f"Ты полезный ассистент. Отвечай строго по тексту:\n\n{large_context}"
         )
-        response = await asyncio.to_thread(
-            gemini_client.models.generate_content,
-            model=MODEL,
-            contents=chat_history,
-            config=config
-        )
+
+    response = await asyncio.to_thread(
+        gemini_client.models.generate_content,
+        model=MODEL,
+        contents=chat_history,
+        config=config
+    )
 
     reply = response.text
     chat_history.append(
         gtypes.Content(role="model", parts=[gtypes.Part(text=reply)])
     )
 
-    # Не храним больше 20 сообщений чтобы не раздувать историю
+    # Держим не больше 20 сообщений в истории
     if len(chat_history) > 20:
         chat_history = chat_history[-20:]
 
@@ -133,20 +127,23 @@ async def handle_message(message: Message, text: str):
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    status = "✅ Кеш активен" if cache_name else "⚠️ Работаю без кеша"
+    status = "✅ Кеш активен, токены экономятся" if cache_name else "⚠️ Работаю без кеша"
     await message.answer(
         f"Привет! База данных загружена. {status}\n"
-        "В группе: /arsi ваш вопрос\n"
-        "Проверка: /status"
+        "В группе пиши: /arsi ваш вопрос\n"
+        "Проверка статуса: /status"
     )
 
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
     if cache_name:
-        await message.answer(f"✅ Кеш активен\n`{cache_name}`\nСообщений в истории: {len(chat_history)}", parse_mode="Markdown")
+        await message.answer(
+            f"✅ Кеш активен\n"
+            f"Сообщений в истории: {len(chat_history)}/20",
+        )
     else:
-        await message.answer("⚠️ Кеш не создан, работаю через system_instruction")
+        await message.answer("⚠️ Кеш не создан. Активируй Pay-as-you-go на aistudio.google.com/plan")
 
 
 @dp.message(Command("arsi"))
@@ -155,7 +152,7 @@ async def cmd_arsi(message: Message):
     if text.startswith(f"@{BOT_USERNAME}"):
         text = text[len(f"@{BOT_USERNAME}"):].strip()
     if not text:
-        await message.reply("Напишите вопрос: /arsi ваш вопрос")
+        await message.reply("Напиши вопрос после команды: /arsi ваш вопрос")
         return
     await handle_message(message, text)
 
