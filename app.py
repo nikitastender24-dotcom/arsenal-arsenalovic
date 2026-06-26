@@ -2,8 +2,9 @@ import asyncio
 import logging
 import os
 import sys
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart, Command
+from aiogram.types import Message
 from google import genai
 from google.genai import errors
 from aiohttp import web
@@ -14,94 +15,109 @@ TELEGRAM_BOT_TOKEN = "8843575311:AAHAc5994cnfJwbXUfMFdagENlRvIi2hye0"
 GEMINI_API_KEY = "AQ.Ab8RN6JIz59H2TAUEE8JsoFk-SHv3M4IGRYFpRFIBYlbYFIwLQ"
 FILE_NAME = "large_prompt.txt"
 PORT = int(os.getenv("PORT", 8080))
+BOT_USERNAME = "arsi"  # имя бота без @
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Глобальная сессия
+global_chat = None
+prompt_loaded = False
 large_context = ""
+
 if os.path.exists(FILE_NAME):
     with open(FILE_NAME, 'r', encoding='utf-8') as f:
         large_context = f.read()
-    logging.info(f"Файл '{FILE_NAME}' загружен ({len(large_context)} симв.)")
+    logging.info(f"Файл загружен: {len(large_context)} симв.")
 else:
     logging.critical(f"Файл '{FILE_NAME}' не найден!")
     sys.exit(1)
 
-# Одна глобальная сессия для всех
-global_chat = None
-prompt_loaded = False
-
 
 def create_chat():
+    """Создаёт чат с промтом сразу в system_instruction — экономит токены"""
     return gemini_client.chats.create(
         model="gemini-2.5-flash",
-        config={"system_instruction": "Ты полезный ассистент."}
+        config={
+            "system_instruction": (
+                f"Ты полезный ассистент. Отвечай строго по этому тексту:\n\n{large_context}"
+            )
+        }
     )
 
 
-async def load_prompt(message: types.Message):
-    """Отправляет промт в глобальный чат"""
-    global prompt_loaded
-    await message.answer("Загружаю базу данных...")
-    try:
-        await asyncio.to_thread(
-            global_chat.send_message,
-            f"Прочитай и запомни этот текст. Ниже будут вопросы:\n\n{large_context}"
-        )
+async def ensure_session():
+    """Гарантирует что сессия существует"""
+    global global_chat, prompt_loaded
+    if global_chat is None:
+        global_chat = create_chat()
         prompt_loaded = True
-        logging.info("Промт успешно загружен в глобальную сессию")
-        await message.answer("✅ База данных загружена!")
-    except errors.APIError as e:
-        logging.error(f"Ошибка загрузки промта: {e}")
-        await message.answer(f"Ошибка при загрузке: {e}")
+        logging.info("Глобальная сессия создана, промт в system_instruction")
 
 
-@dp.message(CommandStart())
-async def command_start_handler(message: types.Message):
-    global global_chat, prompt_loaded
-
-    if global_chat is None:
-        # Первый /start — создаём сессию и грузим промт
-        global_chat = create_chat()
-        await load_prompt(message)
-    else:
-        await message.answer(
-            "Сессия уже активна, база данных загружена.\n"
-            "Задавайте вопросы! Чтобы перезагрузить базу — напишите *Загрузи промт*",
-            parse_mode="Markdown"
-        )
+async def ask_gemini(user_text: str) -> str:
+    """Отправляет сообщение в Gemini и возвращает ответ"""
+    await ensure_session()
+    response = await asyncio.to_thread(global_chat.send_message, user_text)
+    return response.text
 
 
-@dp.message()
-async def message_handler(message: types.Message):
-    global global_chat, prompt_loaded
-    user_text = message.text.strip()
-
-    # Если сессии ещё нет (бот перезапустился)
-    if global_chat is None:
-        global_chat = create_chat()
-        prompt_loaded = False
-
+async def handle_message(message: Message, text: str):
+    """Общий обработчик — отвечает в тот же чат"""
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-
-    # Команда перезагрузки промта
-    if user_text.lower() == "загрузи промт":
-        prompt_loaded = False  # сбрасываем флаг чтобы загрузить заново
-        await load_prompt(message)
-        return
-
-    # Обычное сообщение
     try:
-        response = await asyncio.to_thread(global_chat.send_message, user_text)
-        await message.answer(response.text)
+        reply = await ask_gemini(text)
+        await message.reply(reply)
     except errors.APIError as e:
         logging.error(f"Gemini API Error: {e}")
-        await message.answer(f"Ошибка со стороны ИИ: {e}")
+        await message.reply(f"Ошибка ИИ: {e}")
     except Exception as e:
         logging.error(f"Ошибка: {e}")
-        await message.answer(f"Не удалось получить ответ: {e}")
+        await message.reply("Не удалось получить ответ.")
+
+
+# /start — личка
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    await ensure_session()
+    await message.answer(
+        "Привет! База данных загружена, задавайте вопросы.\n"
+        "В группе используйте: /arsi ваш вопрос"
+    )
+
+
+# /status — проверка загружен ли промт
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    if global_chat is not None and prompt_loaded:
+        await message.answer("✅ Сессия активна, база данных загружена.")
+    else:
+        await message.answer("❌ Сессия не активна.")
+
+
+# /arsi вопрос — для групп и лички
+@dp.message(Command("arsi"))
+async def cmd_arsi(message: Message):
+    # Вытаскиваем текст после команды
+    text = message.text.replace("/arsi", "", 1).strip()
+    # Убираем @botusername если есть
+    if text.startswith(f"@{BOT_USERNAME}"):
+        text = text[len(f"@{BOT_USERNAME}"):].strip()
+
+    if not text:
+        await message.reply("Напишите вопрос после команды: /arsi ваш вопрос")
+        return
+
+    await handle_message(message, text)
+
+
+# Личные сообщения (не команды) — отвечаем напрямую
+@dp.message(F.chat.type == "private")
+async def private_message(message: Message):
+    if not message.text:
+        return
+    await handle_message(message, message.text.strip())
 
 
 async def handle_hc(request):
@@ -109,10 +125,8 @@ async def handle_hc(request):
 
 
 async def main():
-    global global_chat
-    # Создаём сессию сразу при старте бота
-    global_chat = create_chat()
-    logging.info("Глобальная сессия Gemini создана")
+    # Создаём сессию сразу при старте
+    await ensure_session()
 
     app = web.Application()
     app.router.add_get('/', handle_hc)
@@ -120,7 +134,7 @@ async def main():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logging.info(f"Веб-сервер запущен на порту {PORT}")
+    logging.info(f"Веб-сервер на порту {PORT}")
     await dp.start_polling(bot)
 
 
