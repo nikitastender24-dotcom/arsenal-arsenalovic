@@ -3,7 +3,7 @@ import logging
 import os
 import sys
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from google import genai
 from google.genai import errors
 from aiohttp import web
@@ -18,70 +18,88 @@ PORT = int(os.getenv("PORT", 8080))
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# УБРАНЫ лишние http_options — они и вызывали ошибку
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-user_chats = {}
+# Хранилище сессий: {user_id: {"chat": chat, "prompt_loaded": bool}}
+user_sessions = {}
 large_context = ""
 
 if os.path.exists(FILE_NAME):
     with open(FILE_NAME, 'r', encoding='utf-8') as f:
         large_context = f.read()
-    logging.info(f"Файл '{FILE_NAME}' успешно загружен ({len(large_context)} симв.)")
+    logging.info(f"Файл '{FILE_NAME}' загружен ({len(large_context)} симв.)")
 else:
-    logging.critical(f"Критическая ошибка: Файл '{FILE_NAME}' не найден!")
+    logging.critical(f"Файл '{FILE_NAME}' не найден!")
     sys.exit(1)
 
 
-async def get_or_create_chat(user_id: int, message_to_alert: types.Message = None):
-    if user_id in user_chats:
-        return user_chats[user_id]
-        
-    logging.info(f"Инициализация сессии Gemini для {user_id}...")
-    if message_to_alert:
-        await message_to_alert.answer("Секунду... Загружаю базу данных в вашу сессию ИИ...")
-
-    chat = gemini_client.chats.create(
+def create_chat():
+    """Создаёт новый чат без промта"""
+    return gemini_client.chats.create(
         model="gemini-2.5-flash",
-        config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
+        config={"system_instruction": "Ты полезный ассистент."}
     )
-    
-    first_prompt = f"Прочитай и запомни этот текст. Ниже будут вопросы:\n\n{large_context}"
-    await asyncio.to_thread(chat.send_message, first_prompt)
-    user_chats[user_id] = chat
-    return chat
 
 
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message):
     user_id = message.from_user.id
-    try:
-        await get_or_create_chat(user_id, message_to_alert=message)
-        await message.answer("Готово! База данных загружена. Задавайте ваши вопросы.")
-    except Exception as e:
-        logging.error(f"Ошибка при /start для {user_id}: {e}")
-        await message.answer(f"Ошибка ИИ: {e}")
+    user_sessions[user_id] = {
+        "chat": create_chat(),
+        "prompt_loaded": False
+    }
+    await message.answer(
+        "Привет! Сессия создана.\n\n"
+        "Чтобы загрузить базу данных в контекст — напишите *Загрузи промт*\n"
+        "Или просто задавайте вопросы без базы данных.",
+        parse_mode="Markdown"
+    )
 
 
 @dp.message()
 async def message_handler(message: types.Message):
     user_id = message.from_user.id
-    user_text = message.text
+    user_text = message.text.strip()
+
+    # Создаём сессию если нет (например бот перезапустился)
+    if user_id not in user_sessions:
+        user_sessions[user_id] = {
+            "chat": create_chat(),
+            "prompt_loaded": False
+        }
+
+    session = user_sessions[user_id]
 
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
+    # Команда загрузки промта
+    if user_text.lower() == "загрузи промт":
+        if session["prompt_loaded"]:
+            await message.answer("База данных уже загружена в эту сессию.")
+            return
+
+        await message.answer("Загружаю базу данных...")
+        try:
+            await asyncio.to_thread(
+                session["chat"].send_message,
+                f"Прочитай и запомни этот текст. Ниже будут вопросы:\n\n{large_context}"
+            )
+            session["prompt_loaded"] = True
+            await message.answer("✅ База данных загружена! Задавайте вопросы.")
+        except errors.APIError as e:
+            logging.error(f"Ошибка загрузки промта для {user_id}: {e}")
+            await message.answer(f"Ошибка при загрузке: {e}")
+        return
+
+    # Обычное сообщение
     try:
-        chat = await get_or_create_chat(user_id, message_to_alert=message)
-        await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-        
-        response = await asyncio.to_thread(chat.send_message, user_text)
+        response = await asyncio.to_thread(session["chat"].send_message, user_text)
         await message.answer(response.text)
-        
     except errors.APIError as e:
         logging.error(f"Gemini API Error для {user_id}: {e}")
         await message.answer(f"Ошибка со стороны ИИ: {e}")
     except Exception as e:
-        logging.error(f"Ошибка обработки сообщения для {user_id}: {e}")
+        logging.error(f"Ошибка для {user_id}: {e}")
         await message.answer(f"Не удалось получить ответ: {e}")
 
 
@@ -96,7 +114,6 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
     logging.info(f"Веб-сервер запущен на порту {PORT}")
-    logging.info("Поллинг Telegram бота запущен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
