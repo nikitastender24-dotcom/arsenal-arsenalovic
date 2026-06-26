@@ -5,27 +5,32 @@ import sys
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
-from google import genai
-from google.genai import errors, types as gtypes
+from openai import AsyncOpenAI  # Используем асинхронный клиент OpenAI
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# Настройки и ключи
 TELEGRAM_BOT_TOKEN = "8843575311:AAHAc5994cnfJwbXUfMFdagENlRvIi2hye0"
-GEMINI_API_KEY = "AQ.Ab8RN6JIz59H2TAUEE8JsoFk-SHv3M4IGRYFpRFIBYlbYFIwLQ"
+DEEPSEEK_API_KEY = "sk-fbd9 r8687c3de42ae9580e045e3a9c543"  # Твой ключ
 FILE_NAME = "large_prompt.txt"
 PORT = int(os.getenv("PORT", 8080))
 BOT_USERNAME = "arsi"
-MODEL = "gemini-2.5-flash"
+MODEL = "deepseek-chat"  # Это основная модель deepseek-v3
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-cache_name = None
-chat_history = []
+# Инициализируем асинхронный клиент с базовым URL DeepSeek
+openai_client = AsyncOpenAI(
+    api_key=DEEPSEEK_API_KEY,
+    base_url="https://api.deepseek.com/v1"
+)
+
+chat_history = []  # История сообщений
 large_context = ""
 
+# Чтение контекста из файла
 if os.path.exists(FILE_NAME):
     with open(FILE_NAME, 'r', encoding='utf-8') as f:
         large_context = f.read()
@@ -35,115 +40,73 @@ else:
     sys.exit(1)
 
 
-async def init_cache():
-    global cache_name
-    try:
-        logging.info("Загружаю файл в Files API...")
-        tmp_path = "/tmp/large_prompt.txt"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            f.write(large_context)
-
-        uploaded = await asyncio.to_thread(
-            gemini_client.files.upload,
-            file=tmp_path,
-            config={"mime_type": "text/plain", "display_name": "large_prompt"}
-        )
-        logging.info(f"Файл загружен: {uploaded.uri}")
-
-        cache = await asyncio.to_thread(
-            gemini_client.caches.create,
-            model=MODEL,
-            config=gtypes.CreateCachedContentConfig(
-                contents=[
-                    gtypes.Content(
-                        role="user",
-                        parts=[gtypes.Part.from_uri(
-                            file_uri=uploaded.uri,
-                            mime_type="text/plain"
-                        )]
-                    )
-                ],
-                system_instruction="Ты полезный ассистент. Отвечай строго по загруженному тексту.",
-                display_name="bot_prompt_cache",
-                ttl="3600s"
-            )
-        )
-        cache_name = cache.name
-        logging.info(f"Кеш создан: {cache_name}")
-
-    except Exception as e:
-        logging.error(f"Ошибка создания кеша: {e}")
-        logging.warning("Работаю без кеша — каждый запрос будет тратить токены на промт!")
-        cache_name = None
-
-
-async def ask_gemini(user_text: str) -> str:
+async def ask_deepseek(user_text: str) -> str:
+    """Отправляет запрос в DeepSeek с сохранением истории"""
     global chat_history
 
-    chat_history.append(
-        gtypes.Content(role="user", parts=[gtypes.Part(text=user_text)])
-    )
+    # Добавляем сообщение пользователя в историю
+    chat_history.append({"role": "user", "content": user_text})
 
-    if cache_name:
-        config = gtypes.GenerateContentConfig(
-            cached_content=cache_name
+    # Формируем системный промт с контекстом
+    system_instruction = f"Ты полезный ассистент. Отвечай строго по загруженному тексту:\n\n{large_context}"
+    
+    # Собираем полный пакет сообщений для API
+    messages = [{"role": "system", "content": system_instruction}] + chat_history
+
+    try:
+        # Вызываем API асинхронно
+        response = await openai_client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            stream=False
         )
-    else:
-        config = gtypes.GenerateContentConfig(
-            system_instruction=f"Ты полезный ассистент. Отвечай строго по тексту:\n\n{large_context}"
-        )
+        
+        reply = response.choices[0].message.content
+        
+        # Добавляем ответ модели в историю
+        chat_history.append({"role": "assistant", "content": reply})
 
-    response = await asyncio.to_thread(
-        gemini_client.models.generate_content,
-        model=MODEL,
-        contents=chat_history,
-        config=config
-    )
+        # Ограничиваем историю последних 20 сообщений (10 пар), чтобы не вылезать за лимиты
+        if len(chat_history) > 20:
+            chat_history = chat_history[-20:]
 
-    reply = response.text
-    chat_history.append(
-        gtypes.Content(role="model", parts=[gtypes.Part(text=reply)])
-    )
+        return reply
 
-    # Держим не больше 20 сообщений в истории
-    if len(chat_history) > 20:
-        chat_history = chat_history[-20:]
-
-    return reply
+    except Exception as e:
+        logging.error(f"Ошибка API DeepSeek: {e}")
+        # Если произошла ошибка, удаляем последнее сообщение пользователя, чтобы не ломать контекст
+        if chat_history and chat_history[-1]["content"] == user_text:
+            chat_history.pop()
+        raise e
 
 
 async def handle_message(message: Message, text: str):
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
-        reply = await ask_gemini(text)
+        reply = await ask_deepseek(text)
         await message.reply(reply)
-    except errors.APIError as e:
-        logging.error(f"Gemini API Error: {e}")
-        await message.reply(f"Ошибка ИИ: {e}")
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.reply("Не удалось получить ответ.")
+        await message.reply(f"Произошла ошибка при обращении к DeepSeek: {e}")
 
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    status = "✅ Кеш активен, токены экономятся" if cache_name else "⚠️ Работаю без кеша"
     await message.answer(
-        f"Привет! База данных загружена. {status}\n"
-        "В группе пиши: /arsi ваш вопрос\n"
-        "Проверка статуса: /status"
+        f"Привет! База данных загружена под DeepSeek.\n"
+        "В группе: /arsi ваш вопрос\n"
+        "Проверка: /status"
     )
 
 
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
-    if cache_name:
-        await message.answer(
-            f"✅ Кеш активен\n"
-            f"Сообщений в истории: {len(chat_history)}/20",
-        )
-    else:
-        await message.answer("⚠️ Кеш не создан. Активируй Pay-as-you-go на aistudio.google.com/plan")
+    # У DeepSeek кэширование контекста работает автоматически на их стороне
+    await message.answer(
+        f"✅ Бот работает на модели `{MODEL}`\n"
+        f"Размер системного контекста: {len(large_context)} симв.\n"
+        f"Сообщений в текущей истории: {len(chat_history)}", 
+        parse_mode="Markdown"
+    )
 
 
 @dp.message(Command("arsi"))
@@ -152,7 +115,7 @@ async def cmd_arsi(message: Message):
     if text.startswith(f"@{BOT_USERNAME}"):
         text = text[len(f"@{BOT_USERNAME}"):].strip()
     if not text:
-        await message.reply("Напиши вопрос после команды: /arsi ваш вопрос")
+        await message.reply("Напишите вопрос: /arsi ваш вопрос")
         return
     await handle_message(message, text)
 
@@ -169,15 +132,16 @@ async def handle_hc(request):
 
 
 async def main():
-    await init_cache()
-
+    # Настройка веб-сервера (для пингов/хелсчеков, например на Render/Heroku)
     app = web.Application()
     app.router.add_get('/', handle_hc)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logging.info(f"Веб-сервер на порту {PORT}")
+    logging.info(f"Веб-сервер запущен на порту {PORT}")
+    
+    # Старт поллинга бота
     await dp.start_polling(bot)
 
 
