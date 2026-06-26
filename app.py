@@ -10,25 +10,16 @@ from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ================= КЛЮЧИ И НАСТРОЙКИ =================
 TELEGRAM_BOT_TOKEN = "8843575311:AAHAc5994cnfJwbXUfMFdagENlRvIi2hye0"
-GEMINI_API_KEY = "AQ.Ab8RN6LNCGfezco-Om8crrq8yHaWqdVclOnKQJ8cZg2vkFXmJQ"
+GEMINI_API_KEY = "AQ.Ab8RN6JIz59H2TAUEE8JsoFk-SHv3M4IGRYFpRFIBYlbYFIwLQ"
 FILE_NAME = "large_prompt.txt"
 PORT = int(os.getenv("PORT", 8080))
-# =====================================================
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# РАБОЧИЙ ВАРИАНТ ДЛЯ НОВЫХ КЛЮЧЕЙ:
-# Инициализируем клиент без credentials, но принудительно перебиваем 
-# заголовки запросов, чтобы новый ключ передавался напрямую как API-key.
-gemini_client = genai.Client(
-    api_key=GEMINI_API_KEY,
-    http_options={
-        'headers': {'X-goog-api-key': GEMINI_API_KEY}
-    }
-)
+# УБРАНЫ лишние http_options — они и вызывали ошибку
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 user_chats = {}
 large_context = ""
@@ -50,7 +41,6 @@ async def get_or_create_chat(user_id: int, message_to_alert: types.Message = Non
     if message_to_alert:
         await message_to_alert.answer("Секунду... Загружаю базу данных в вашу сессию ИИ...")
 
-    # Работаем через дефолтную gemini-1.5-flash
     chat = gemini_client.chats.create(
         model="gemini-1.5-flash",
         config={"system_instruction": "Ты полезный ассистент, отвечающий строго по предоставленному тексту."}
@@ -67,10 +57,10 @@ async def command_start_handler(message: types.Message):
     user_id = message.from_user.id
     try:
         await get_or_create_chat(user_id, message_to_alert=message)
-        await message.answer("Готово! База данных загружена по умолчанию. Задавайте ваши вопросы.")
+        await message.answer("Готово! База данных загружена. Задавайте ваши вопросы.")
     except Exception as e:
         logging.error(f"Ошибка при /start для {user_id}: {e}")
-        await message.answer("Ошибка ИИ. Проверь логи сборки.")
+        await message.answer(f"Ошибка ИИ: {e}")
 
 
 @dp.message()
@@ -89,14 +79,14 @@ async def message_handler(message: types.Message):
         
     except errors.APIError as e:
         logging.error(f"Gemini API Error для {user_id}: {e}")
-        await message.answer("Ошибка со стороны ИИ.")
+        await message.answer(f"Ошибка со стороны ИИ: {e}")
     except Exception as e:
         logging.error(f"Ошибка обработки сообщения для {user_id}: {e}")
-        await message.answer("Не удалось получить ответ.")
+        await message.answer(f"Не удалось получить ответ: {e}")
 
 
 async def handle_hc(request):
-    return web.Response(text="Бот онлайн, импорты очищены!")
+    return web.Response(text="Бот онлайн!")
 
 async def main():
     app = web.Application()
