@@ -6,7 +6,7 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message
 from google import genai
-from google.genai import errors
+from google.genai import errors, types as gtypes
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -15,15 +15,15 @@ TELEGRAM_BOT_TOKEN = "8843575311:AAHAc5994cnfJwbXUfMFdagENlRvIi2hye0"
 GEMINI_API_KEY = "AQ.Ab8RN6JIz59H2TAUEE8JsoFk-SHv3M4IGRYFpRFIBYlbYFIwLQ"
 FILE_NAME = "large_prompt.txt"
 PORT = int(os.getenv("PORT", 8080))
-BOT_USERNAME = "arsi"  # имя бота без @
+BOT_USERNAME = "arsi"
+MODEL = "gemini-2.5-flash"
 
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Глобальная сессия
-global_chat = None
-prompt_loaded = False
+cache_name = None        # имя кеша на серверах Google
+chat_history = []        # история сообщений глобальная
 large_context = ""
 
 if os.path.exists(FILE_NAME):
@@ -35,36 +35,90 @@ else:
     sys.exit(1)
 
 
-def create_chat():
-    """Создаёт чат с промтом сразу в system_instruction — экономит токены"""
-    return gemini_client.chats.create(
-        model="gemini-2.5-flash",
-        config={
-            "system_instruction": (
-                f"Ты полезный ассистент. Отвечай строго по этому тексту:\n\n{large_context}"
+async def init_cache():
+    """Загружает промт в кеш Google один раз при старте"""
+    global cache_name
+    try:
+        logging.info("Создаю кеш промта на серверах Google...")
+
+        # Загружаем файл через Files API
+        uploaded = await asyncio.to_thread(
+            gemini_client.files.upload,
+            file=(FILE_NAME.encode(), large_context.encode('utf-8')),
+            config={"mime_type": "text/plain", "display_name": "large_prompt"}
+        )
+
+        # Создаём кеш со ссылкой на файл — TTL 1 час
+        cache = await asyncio.to_thread(
+            gemini_client.caches.create,
+            model=MODEL,
+            config=gtypes.CreateCachedContentConfig(
+                contents=[
+                    gtypes.Content(
+                        role="user",
+                        parts=[gtypes.Part.from_uri(
+                            file_uri=uploaded.uri,
+                            mime_type="text/plain"
+                        )]
+                    )
+                ],
+                system_instruction="Ты полезный ассистент. Отвечай строго по загруженному тексту.",
+                display_name="bot_prompt_cache",
+                ttl="3600s"
             )
-        }
-    )
-
-
-async def ensure_session():
-    """Гарантирует что сессия существует"""
-    global global_chat, prompt_loaded
-    if global_chat is None:
-        global_chat = create_chat()
-        prompt_loaded = True
-        logging.info("Глобальная сессия создана, промт в system_instruction")
+        )
+        cache_name = cache.name
+        logging.info(f"Кеш создан: {cache_name}")
+    except Exception as e:
+        logging.error(f"Ошибка создания кеша: {e}")
+        logging.warning("Буду работать без кеша (через system_instruction)")
+        cache_name = None
 
 
 async def ask_gemini(user_text: str) -> str:
-    """Отправляет сообщение в Gemini и возвращает ответ"""
-    await ensure_session()
-    response = await asyncio.to_thread(global_chat.send_message, user_text)
-    return response.text
+    """Отправляет вопрос, используя кеш если есть"""
+    global chat_history
+
+    chat_history.append(
+        gtypes.Content(role="user", parts=[gtypes.Part(text=user_text)])
+    )
+
+    if cache_name:
+        # Запрос с кешем — промт не тратит токены заново
+        config = gtypes.GenerateContentConfig(
+            cached_content=cache_name
+        )
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model=MODEL,
+            contents=chat_history,
+            config=config
+        )
+    else:
+        # Fallback без кеша
+        config = gtypes.GenerateContentConfig(
+            system_instruction=f"Ты полезный ассистент. Отвечай по тексту:\n\n{large_context}"
+        )
+        response = await asyncio.to_thread(
+            gemini_client.models.generate_content,
+            model=MODEL,
+            contents=chat_history,
+            config=config
+        )
+
+    reply = response.text
+    chat_history.append(
+        gtypes.Content(role="model", parts=[gtypes.Part(text=reply)])
+    )
+
+    # Не храним больше 20 сообщений чтобы не раздувать историю
+    if len(chat_history) > 20:
+        chat_history = chat_history[-20:]
+
+    return reply
 
 
 async def handle_message(message: Message, text: str):
-    """Общий обработчик — отвечает в тот же чат"""
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     try:
         reply = await ask_gemini(text)
@@ -77,42 +131,35 @@ async def handle_message(message: Message, text: str):
         await message.reply("Не удалось получить ответ.")
 
 
-# /start — личка
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await ensure_session()
+    status = "✅ Кеш активен" if cache_name else "⚠️ Работаю без кеша"
     await message.answer(
-        "Привет! База данных загружена, задавайте вопросы.\n"
-        "В группе используйте: /arsi ваш вопрос"
+        f"Привет! База данных загружена. {status}\n"
+        "В группе: /arsi ваш вопрос\n"
+        "Проверка: /status"
     )
 
 
-# /status — проверка загружен ли промт
 @dp.message(Command("status"))
 async def cmd_status(message: Message):
-    if global_chat is not None and prompt_loaded:
-        await message.answer("✅ Сессия активна, база данных загружена.")
+    if cache_name:
+        await message.answer(f"✅ Кеш активен\n`{cache_name}`\nСообщений в истории: {len(chat_history)}", parse_mode="Markdown")
     else:
-        await message.answer("❌ Сессия не активна.")
+        await message.answer("⚠️ Кеш не создан, работаю через system_instruction")
 
 
-# /arsi вопрос — для групп и лички
 @dp.message(Command("arsi"))
 async def cmd_arsi(message: Message):
-    # Вытаскиваем текст после команды
     text = message.text.replace("/arsi", "", 1).strip()
-    # Убираем @botusername если есть
     if text.startswith(f"@{BOT_USERNAME}"):
         text = text[len(f"@{BOT_USERNAME}"):].strip()
-
     if not text:
-        await message.reply("Напишите вопрос после команды: /arsi ваш вопрос")
+        await message.reply("Напишите вопрос: /arsi ваш вопрос")
         return
-
     await handle_message(message, text)
 
 
-# Личные сообщения (не команды) — отвечаем напрямую
 @dp.message(F.chat.type == "private")
 async def private_message(message: Message):
     if not message.text:
@@ -125,8 +172,7 @@ async def handle_hc(request):
 
 
 async def main():
-    # Создаём сессию сразу при старте
-    await ensure_session()
+    await init_cache()
 
     app = web.Application()
     app.router.add_get('/', handle_hc)
